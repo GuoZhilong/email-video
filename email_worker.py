@@ -70,10 +70,14 @@ def read_quota_info(task_id):
 
 def handle_email(from_addr, subject, params):
     prompt = params["prompt"]
-    print(f"[mail] 收到来自 {from_addr} 的请求: {prompt[:60]}")
+    images = params.pop("images", [])
+    print(f"[mail] 收到来自 {from_addr} 的请求: {prompt[:60]} 附图={len(images)}张")
 
-    # 先回一封确认邮件
-    send_reply(from_addr, subject, f"已收到您的请求，视频生成中，完成后会自动发送给您。\n\nPrompt: {prompt}")
+    img_hint = f"（附带 {len(images)} 张参考图片）" if images else ""
+    send_reply(from_addr, subject, f"已收到您的请求，视频生成中，完成后会自动发送给您。\n\nPrompt: {prompt}{img_hint}")
+
+    if images:
+        params["images"] = images
 
     # 提交生成任务
     resp = requests.post(f"{API_BASE}/api/generate", json=params)
@@ -144,17 +148,31 @@ def parse_body(body):
     return params, None
 
 
-def extract_body(mail_bytes):
+def extract_body_and_images(mail_bytes):
+    """返回 (body_text, images)，images 为 base64 data URI 列表。"""
+    import base64 as _b64
     msg = message_from_bytes(mail_bytes)
     body = ""
+    images = []
+
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
-                body = part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="ignore")
-                break
+            ct = part.get_content_type()
+            if ct == "text/plain" and not body:
+                body = part.get_payload(decode=True).decode(
+                    part.get_content_charset() or "utf-8", errors="ignore"
+                )
+            elif ct.startswith("image/"):
+                data = part.get_payload(decode=True)
+                if data:
+                    b64 = _b64.b64encode(data).decode()
+                    images.append(f"data:{ct};base64,{b64}")
     else:
-        body = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="ignore")
-    return body.strip()
+        body = msg.get_payload(decode=True).decode(
+            msg.get_content_charset() or "utf-8", errors="ignore"
+        )
+
+    return body.strip(), images
 
 
 def listen():
@@ -176,7 +194,7 @@ def listen():
 
                         from_addr = envelope.from_[0].mailbox.decode() + "@" + envelope.from_[0].host.decode()
                         subject = envelope.subject.decode("utf-8", errors="ignore") if envelope.subject else ""
-                        body = extract_body(mail_bytes)
+                        body, images = extract_body_and_images(mail_bytes)
 
                         client.set_flags([uid], [b"\\Seen"])
 
@@ -190,6 +208,8 @@ def listen():
                             send_reply(from_addr, subject, f"邮件格式有误，无法生成视频。\n\n{error}")
                             continue
 
+                        if images:
+                            params["images"] = images
                         t = threading.Thread(target=handle_email, args=(from_addr, subject, params), daemon=True)
                         t.start()
 

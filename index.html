@@ -68,6 +68,16 @@
   .param-group label { font-size: 10px; color: #666; }
   .param-group select, .param-group input { background: #1e2d4a; border: 1px solid #2a2a4a; border-radius: 4px; padding: 5px 8px; color: #ccc; font-size: 12px; outline: none; }
 
+  /* 图片上传 */
+  .image-upload-area { margin: 10px 0 6px; }
+  .image-upload-label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; color: #7fb3d3; background: #0f0f1a; border: 1px dashed #2a2a4a; border-radius: 6px; padding: 7px 12px; transition: border-color 0.15s; }
+  .image-upload-label:hover { border-color: #7fb3d3; }
+  #imageInput { display: none; }
+  .image-previews { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .image-thumb-wrap { position: relative; }
+  .image-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 5px; border: 1px solid #2a2a4a; display: block; }
+  .image-thumb-remove { position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; border-radius: 50%; background: #e94560; border: none; color: #fff; font-size: 10px; cursor: pointer; display: flex; align-items: center; justify-content: center; line-height: 1; }
+
   /* 底部按钮栏 */
   .input-footer { display: flex; align-items: center; gap: 10px; }
   .generating-hint { font-size: 11px; color: #f59e0b; flex: 1; }
@@ -131,6 +141,12 @@
         </div>
       </div>
 
+      <div class="image-upload-area">
+        <label class="image-upload-label" for="imageInput">🖼 添加参考图片（可多选）</label>
+        <input type="file" id="imageInput" accept="image/*" multiple onchange="onImagesSelected(this)">
+        <div class="image-previews" id="imagePreviews"></div>
+      </div>
+
       <div class="input-footer">
         <span class="generating-hint" id="hint"></span>
         <button class="btn-generate" id="btnGenerate" onclick="generate()">生成视频</button>
@@ -143,6 +159,38 @@
 const API = 'http://localhost:8765';
 let currentTaskId = null;
 let pollTimer = null;
+let selectedImages = []; // [{dataUri, name}]
+
+function onImagesSelected(input) {
+  const files = Array.from(input.files);
+  let pending = files.length;
+  if (!pending) return;
+  files.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      selectedImages.push({ dataUri: e.target.result, name: file.name });
+      renderImagePreviews();
+    };
+    reader.onerror = () => alert('图片读取失败: ' + file.name);
+    reader.readAsDataURL(file);
+  });
+  input.value = '';
+}
+
+function removeImage(idx) {
+  selectedImages.splice(idx, 1);
+  renderImagePreviews();
+}
+
+function renderImagePreviews() {
+  const container = document.getElementById('imagePreviews');
+  container.innerHTML = selectedImages.map((img, i) =>
+    `<div class="image-thumb-wrap">
+      <img class="image-thumb" src="${img.dataUri}" title="${escHtml(img.name)}">
+      <button class="image-thumb-remove" onclick="removeImage(${i})">×</button>
+    </div>`
+  ).join('');
+}
 
 function toggleParams() {
   const toggle = document.getElementById('paramsToggle');
@@ -164,6 +212,7 @@ async function generate() {
     model: document.getElementById('model').value,
     resolution: document.getElementById('resolution').value,
     duration: document.getElementById('duration').value,
+    images: selectedImages.map(img => img.dataUri),
   };
 
   try {
@@ -223,6 +272,7 @@ function renderHistory(items) {
       <div class="item-meta">
         <span class="status-dot dot-${item.status}"></span>
         <span>${statusLabel}</span>
+        ${item.has_image ? '<span title="含参考图">🖼</span>' : ''}
         <span>${timeStr}</span>
       </div>
     </div>`;

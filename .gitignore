@@ -23,3 +23,12 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# env
+.superpowers/
+openspec/
+
+# Test files
+test*.jpg
+test_*.py
+test_result_*.mp4

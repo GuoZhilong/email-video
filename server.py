@@ -27,11 +27,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def log_request(task_id, payload, submit_resp, quota_before=None):
+def log_request(task_id, payload, submit_resp, quota_before=None, has_image=False):
     """每次生成请求写一条详细日志到独立 JSON 文件。"""
     log_entry = {
         "task_id": task_id,
         "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "has_image": has_image,
         "request": payload,
         "submit_response": submit_resp,
         "quota_before": quota_before,
@@ -236,15 +237,34 @@ class Handler(BaseHTTPRequestHandler):
             model = body.get("model", "doubao-seedance-2-0-fast-260128")
             resolution = body.get("resolution", "")
             duration = body.get("duration", "")
+            images = body.get("images", [])  # list of base64 data URIs
 
             try:
                 quota_before = get_quota()
                 token = get_token()
                 payload = {"model": model, "prompt": prompt}
+
+                metadata = {"watermark": False}
                 if resolution:
-                    payload["size"] = resolution
+                    metadata["resolution"] = resolution
                 if duration:
-                    payload["duration"] = int(duration)
+                    metadata["duration"] = int(duration)
+
+                if images:
+                    content = [{"type": "text", "text": prompt}]
+                    for img in images:
+                        content.append({
+                            "type": "image_url",
+                            "image_url": {"url": img},
+                            "role": "reference_image",
+                        })
+                    metadata["content"] = content
+                    payload["metadata"] = metadata
+                else:
+                    if resolution:
+                        payload["size"] = resolution
+                    if duration:
+                        payload["duration"] = int(duration)
 
                 resp = requests.post(
                     f"{OPENAI_BASE_URL}/video/generations",
@@ -261,7 +281,7 @@ class Handler(BaseHTTPRequestHandler):
                 logger.info("任务已提交 task_id=%s prompt=%.80s model=%s quota_before=%s",
                             task_id, prompt, model,
                             quota_before.get("quota_balance") if quota_before else "N/A")
-                log_request(task_id, payload, result, quota_before)
+                log_request(task_id, payload, result, quota_before, has_image=bool(images))
 
                 entry = {
                     "task_id": task_id,
@@ -270,6 +290,7 @@ class Handler(BaseHTTPRequestHandler):
                     "status": "queued",
                     "progress": "0%",
                     "filename": None,
+                    "has_image": bool(images),
                     "created_at": int(time.time()),
                 }
                 with history_lock:
