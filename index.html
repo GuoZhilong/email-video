@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>视频生成 Demo</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #0f0f1a; color: #e0e0e0; height: 100vh; display: flex; flex-direction: column; }
+
+  /* 顶栏 */
+  .topbar { background: #16213e; border-bottom: 1px solid #2a2a4a; padding: 0 20px; height: 48px; display: flex; align-items: center; font-size: 15px; font-weight: 600; flex-shrink: 0; }
+  .topbar span { color: #e94560; margin-right: 8px; }
+
+  /* 主体 */
+  .main { display: flex; flex: 1; overflow: hidden; }
+
+  /* 侧边栏 */
+  .sidebar { width: 220px; background: #16213e; border-right: 1px solid #2a2a4a; display: flex; flex-direction: column; flex-shrink: 0; }
+  .sidebar-title { padding: 12px 14px; border-bottom: 1px solid #2a2a4a; font-size: 11px; color: #7fb3d3; letter-spacing: 0.08em; text-transform: uppercase; }
+  .history-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .history-item { border-radius: 6px; padding: 9px 11px; margin-bottom: 6px; cursor: pointer; transition: background 0.15s; }
+  .history-item:hover { background: #1e2d4a; }
+  .history-item.active { background: #e94560; }
+  .history-item.active .item-prompt { color: #fff; }
+  .history-item.active .item-meta { color: rgba(255,255,255,0.7); }
+  .item-prompt { font-size: 12px; color: #ccc; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 3px; }
+  .item-meta { font-size: 10px; color: #666; display: flex; gap: 6px; align-items: center; }
+  .status-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .dot-queued, .dot-in_progress { background: #f59e0b; }
+  .dot-SUCCESS { background: #22c55e; }
+  .dot-FAILED, .dot-CANCELLED { background: #ef4444; }
+  .sidebar-footer { padding: 10px; border-top: 1px solid #2a2a4a; }
+  .btn-new { width: 100%; background: #e94560; border: none; border-radius: 6px; padding: 8px; color: #fff; font-size: 12px; cursor: pointer; font-weight: 600; }
+  .btn-new:hover { background: #c73652; }
+
+  /* 内容区 */
+  .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+  /* 预览区 */
+  .preview { flex: 1; display: flex; align-items: center; justify-content: center; background: #0a0a14; position: relative; overflow: hidden; }
+  .preview-empty { text-align: center; color: #444; }
+  .preview-empty .icon { font-size: 48px; margin-bottom: 12px; }
+  .preview-empty p { font-size: 13px; }
+  .preview video { max-width: 90%; max-height: 90%; border-radius: 8px; }
+  .preview-status { position: absolute; top: 14px; right: 14px; border-radius: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; }
+  .status-SUCCESS { background: #166534; color: #86efac; }
+  .status-FAILED { background: #7f1d1d; color: #fca5a5; }
+  .status-queued, .status-in_progress { background: #78350f; color: #fde68a; }
+  .preview-actions { position: absolute; bottom: 16px; display: flex; gap: 10px; }
+  .btn-action { background: rgba(30,45,74,0.9); border: 1px solid #2a2a4a; border-radius: 6px; padding: 6px 16px; color: #7fb3d3; font-size: 12px; cursor: pointer; text-decoration: none; }
+  .btn-action:hover { background: #1e2d4a; }
+  .progress-bar-wrap { position: absolute; bottom: 0; left: 0; right: 0; height: 3px; background: #2a2a4a; }
+  .progress-bar { height: 100%; background: #e94560; transition: width 0.5s; }
+
+  /* 输入区 */
+  .input-area { background: #16213e; border-top: 1px solid #2a2a4a; padding: 14px 18px; flex-shrink: 0; }
+  textarea { width: 100%; background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 6px; padding: 10px 12px; color: #e0e0e0; font-size: 13px; font-family: inherit; resize: none; outline: none; line-height: 1.5; }
+  textarea:focus { border-color: #e94560; }
+
+  /* 折叠参数 */
+  .params-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; color: #7fb3d3; margin: 10px 0 6px; user-select: none; }
+  .params-toggle .arrow { transition: transform 0.2s; font-size: 10px; }
+  .params-toggle.open .arrow { transform: rotate(90deg); }
+  .params-panel { display: none; background: #0f0f1a; border: 1px solid #2a2a4a; border-radius: 6px; padding: 12px; margin-bottom: 10px; }
+  .params-panel.open { display: flex; gap: 12px; flex-wrap: wrap; }
+  .param-group { display: flex; flex-direction: column; gap: 4px; min-width: 140px; }
+  .param-group label { font-size: 10px; color: #666; }
+  .param-group select, .param-group input { background: #1e2d4a; border: 1px solid #2a2a4a; border-radius: 4px; padding: 5px 8px; color: #ccc; font-size: 12px; outline: none; }
+
+  /* 底部按钮栏 */
+  .input-footer { display: flex; align-items: center; gap: 10px; }
+  .generating-hint { font-size: 11px; color: #f59e0b; flex: 1; }
+  .btn-generate { background: #e94560; border: none; border-radius: 6px; padding: 8px 22px; color: #fff; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .btn-generate:hover { background: #c73652; }
+  .btn-generate:disabled { background: #4a2030; color: #888; cursor: not-allowed; }
+</style>
+</head>
+<body>
+
+<div class="topbar"><span>🎬</span> 视频生成 Demo</div>
+
+<div class="main">
+  <!-- 侧边栏 -->
+  <div class="sidebar">
+    <div class="sidebar-title">历史记录</div>
+    <div class="history-list" id="historyList">
+      <div style="color:#555;font-size:12px;padding:12px 4px">暂无记录</div>
+    </div>
+    <div class="sidebar-footer">
+      <button class="btn-new" onclick="newTask()">+ 新建</button>
+    </div>
+  </div>
+
+  <!-- 内容区 -->
+  <div class="content">
+    <!-- 预览区 -->
+    <div class="preview" id="preview">
+      <div class="preview-empty">
+        <div class="icon">🎬</div>
+        <p>输入 Prompt 并点击生成</p>
+      </div>
+    </div>
+
+    <!-- 输入区 -->
+    <div class="input-area">
+      <textarea id="prompt" rows="3" placeholder="描述你想生成的视频内容..."></textarea>
+
+      <div class="params-toggle" id="paramsToggle" onclick="toggleParams()">
+        <span class="arrow">▸</span> 高级参数
+      </div>
+      <div class="params-panel" id="paramsPanel">
+        <div class="param-group">
+          <label>模型</label>
+          <select id="model">
+            <option value="doubao-seedance-2-0-fast-260128">doubao-seedance-2-0-fast</option>
+          </select>
+        </div>
+        <div class="param-group">
+          <label>分辨率</label>
+          <select id="resolution">
+            <option value="">默认</option>
+            <option value="1280x720">1280×720</option>
+            <option value="720x1280">720×1280</option>
+            <option value="1024x1024">1024×1024</option>
+          </select>
+        </div>
+        <div class="param-group">
+          <label>时长（秒）</label>
+          <input type="number" id="duration" placeholder="默认" min="4" max="20" style="width:80px">
+        </div>
+      </div>
+
+      <div class="input-footer">
+        <span class="generating-hint" id="hint"></span>
+        <button class="btn-generate" id="btnGenerate" onclick="generate()">生成视频</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:8765';
+let currentTaskId = null;
+let pollTimer = null;
+
+function toggleParams() {
+  const toggle = document.getElementById('paramsToggle');
+  const panel = document.getElementById('paramsPanel');
+  toggle.classList.toggle('open');
+  panel.classList.toggle('open');
+}
+
+async function generate() {
+  const prompt = document.getElementById('prompt').value.trim();
+  if (!prompt) { alert('请输入 Prompt'); return; }
+
+  const btn = document.getElementById('btnGenerate');
+  btn.disabled = true;
+  document.getElementById('hint').textContent = '提交中...';
+
+  const payload = {
+    prompt,
+    model: document.getElementById('model').value,
+    resolution: document.getElementById('resolution').value,
+    duration: document.getElementById('duration').value,
+  };
+
+  try {
+    const resp = await fetch(`${API}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.error) { alert('错误: ' + JSON.stringify(data.error)); btn.disabled = false; return; }
+    currentTaskId = data.task_id;
+    refreshHistory();
+    startPolling(data.task_id);
+  } catch(e) {
+    alert('请求失败: ' + e.message);
+    btn.disabled = false;
+    document.getElementById('hint').textContent = '';
+  }
+}
+
+function startPolling(taskId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => refreshHistory(taskId), 3000);
+}
+
+async function refreshHistory(pollTaskId) {
+  const resp = await fetch(`${API}/api/history`);
+  const items = await resp.json();
+  renderHistory(items);
+
+  if (pollTaskId || currentTaskId) {
+    const tid = pollTaskId || currentTaskId;
+    const item = items.find(i => i.task_id === tid);
+    if (item) {
+      renderPreview(item);
+      if (['SUCCESS', 'FAILED', 'CANCELLED'].includes(item.status)) {
+        clearInterval(pollTimer);
+        document.getElementById('btnGenerate').disabled = false;
+        document.getElementById('hint').textContent = '';
+      } else {
+        document.getElementById('hint').textContent = `生成中 ${item.progress}`;
+      }
+    }
+  }
+}
+
+function renderHistory(items) {
+  const list = document.getElementById('historyList');
+  if (!items.length) { list.innerHTML = '<div style="color:#555;font-size:12px;padding:12px 4px">暂无记录</div>'; return; }
+  list.innerHTML = items.map(item => {
+    const active = item.task_id === currentTaskId ? 'active' : '';
+    const statusLabel = { SUCCESS: '完成', FAILED: '失败', CANCELLED: '已取消', queued: '排队中', in_progress: '生成中' }[item.status] || item.status;
+    const ts = new Date(item.created_at * 1000);
+    const timeStr = ts.toLocaleTimeString('zh', { hour: '2-digit', minute: '2-digit' });
+    return `<div class="history-item ${active}" onclick="selectTask('${item.task_id}')">
+      <div class="item-prompt">${escHtml(item.prompt)}</div>
+      <div class="item-meta">
+        <span class="status-dot dot-${item.status}"></span>
+        <span>${statusLabel}</span>
+        <span>${timeStr}</span>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function selectTask(taskId) {
+  currentTaskId = taskId;
+  fetch(`${API}/api/history`).then(r => r.json()).then(items => {
+    renderHistory(items);
+    const item = items.find(i => i.task_id === taskId);
+    if (item) {
+      renderPreview(item);
+      document.getElementById('prompt').value = item.prompt;
+      if (!['SUCCESS', 'FAILED', 'CANCELLED'].includes(item.status)) {
+        startPolling(taskId);
+      }
+    }
+  });
+}
+
+function renderPreview(item) {
+  const preview = document.getElementById('preview');
+  const statusLabel = { SUCCESS: '完成', FAILED: '失败', CANCELLED: '已取消', queued: '排队中', in_progress: '生成中' }[item.status] || item.status;
+  const progressPct = item.progress ? item.progress.replace('%', '') : '0';
+
+  let body = '';
+  if (item.status === 'SUCCESS' && item.filename) {
+    body = `<video controls src="${API}/api/video/${item.task_id}"></video>
+      <div class="preview-actions">
+        <a class="btn-action" href="${API}/api/video/${item.task_id}" download="${item.task_id}.mp4">⬇ 下载</a>
+      </div>`;
+  } else if (item.status === 'FAILED') {
+    body = `<div class="preview-empty"><div class="icon">❌</div><p>生成失败</p></div>`;
+  } else {
+    body = `<div class="preview-empty"><div class="icon">⏳</div><p>视频生成中，请稍候…</p></div>
+      <div class="progress-bar-wrap"><div class="progress-bar" style="width:${progressPct}%"></div></div>`;
+  }
+
+  preview.innerHTML = `${body}<div class="preview-status status-${item.status}">${statusLabel}</div>`;
+}
+
+function newTask() {
+  currentTaskId = null;
+  document.getElementById('prompt').value = '';
+  document.getElementById('hint').textContent = '';
+  document.getElementById('btnGenerate').disabled = false;
+  document.getElementById('preview').innerHTML = `<div class="preview-empty"><div class="icon">🎬</div><p>输入 Prompt 并点击生成</p></div>`;
+  refreshHistory();
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// 初始加载历史
+refreshHistory();
+</script>
+</body>
+</html>

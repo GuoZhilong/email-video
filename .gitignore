@@ -1,0 +1,25 @@
+# Sensitive
+cookies.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Media files
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
