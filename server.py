@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import queue
 import time
 import threading
+import uuid
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -108,6 +110,25 @@ def log_completion(task_id, result):
 history = []
 history_lock = threading.Lock()
 
+# 串行任务队列：每次只提交一个任务，上一个下载完成后才提交下一个
+task_queue = queue.Queue()
+
+
+def _queue_worker():
+    """后台线程，串行消费 task_queue，一个任务完成（含下载）后再处理下一个。"""
+    while True:
+        item = task_queue.get()
+        try:
+            payload, token, task_meta = item
+            _submit_and_download(payload, token, task_meta)
+        except Exception as e:
+            logger.error("队列 worker 异常: %s", e)
+        finally:
+            task_queue.task_done()
+
+
+threading.Thread(target=_queue_worker, daemon=True).start()
+
 
 def get_token():
     cookie_value = open(COOKIES_FILE).read().strip()
@@ -137,7 +158,79 @@ def get_quota():
         return None
 
 
-def poll_and_download(task_id, token):
+def _submit_and_download(payload, token, task_meta):
+    """提交任务到远端，轮询直到下载完成。由队列 worker 串行调用。"""
+    pending_id = task_meta["pending_id"]
+
+    # token/quota 在排队期间可能过期，提交前重新获取
+    quota_before = None
+    try:
+        token = get_token()
+        quota_before = get_quota()
+    except Exception as e:
+        logger.error("获取 token/quota 失败，任务无法提交: %s", e)
+        with history_lock:
+            for item in history:
+                if item.get("pending_id") == pending_id:
+                    item["status"] = "FAILED"
+                    break
+        return
+
+    if not token:
+        logger.error("token 为空，任务无法提交 pending_id=%s", pending_id)
+        with history_lock:
+            for item in history:
+                if item.get("pending_id") == pending_id:
+                    item["status"] = "FAILED"
+                    break
+        return
+
+    # 打印 payload 结构用于调试，但隐藏 base64 内容（避免日志爆炸）
+    def _summarize(obj):
+        if isinstance(obj, dict):
+            return {k: _summarize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_summarize(x) for x in obj]
+        if isinstance(obj, str) and obj.startswith("data:") and len(obj) > 80:
+            return f"<{obj[:30]}...{len(obj)} chars>"
+        if isinstance(obj, str) and len(obj) > 200:
+            return f"{obj[:200]}...({len(obj)} chars)"
+        return obj
+
+    logger.info("提交 payload: %s", json.dumps(_summarize(payload), ensure_ascii=False))
+
+    resp = requests.post(
+        f"{OPENAI_BASE_URL}/video/generations",
+        json=payload,
+        headers=openai_headers(token),
+    )
+    result = resp.json()
+    task_id = result.get("task_id", "")
+    if not task_id:
+        logger.warning("生成请求失败: %s", result)
+        with history_lock:
+            for item in history:
+                if item.get("pending_id") == pending_id:
+                    item["status"] = "FAILED"
+                    break
+        return
+
+    logger.info("任务已提交 task_id=%s prompt=%.80s model=%s quota_before=%s",
+                task_id, payload.get("prompt", ""), payload.get("model", ""),
+                quota_before.get("quota_balance") if quota_before else "N/A")
+    log_request(task_id, payload, result, quota_before, has_image=task_meta["has_media"])
+
+    # 更新 pending entry：替换 task_id，更新状态，不新增 entry
+    with history_lock:
+        for item in history:
+            if item.get("pending_id") == pending_id:
+                item["task_id"] = task_id
+                item["status"] = "queued"
+                item.pop("queue_position", None)
+                break
+
+    # 轮询直到完成，先等一段时间再开始
+    time.sleep(5)
     while True:
         resp = requests.get(f"{OPENAI_BASE_URL}/video/generations/{task_id}", headers=openai_headers(token))
         result = resp.json()
@@ -239,18 +332,37 @@ class Handler(BaseHTTPRequestHandler):
             duration = body.get("duration", "")
             images = body.get("images", [])  # list of base64 data URIs
 
+            ratio = body.get("ratio", "")
+            generate_audio = body.get("generate_audio", None)
+            # content items: list of {type, ...url..., role} dicts (image_url/video_url/audio_url)
+            content_items = body.get("content", [])
+
             try:
-                quota_before = get_quota()
-                token = get_token()
                 payload = {"model": model, "prompt": prompt}
+
+                has_media = bool(images or content_items)
+
+                # r2v 模式（有图片/视频）下，fast 模型不支持 duration / resolution
+                if has_media and "fast" in model.lower():
+                    # if duration:
+                    #     logger.warning("模型 %s 在 r2v 模式下不支持 duration 参数，已忽略", model)
+                    #     duration = ""
+                    if resolution:
+                        logger.warning("模型 %s 在 r2v 模式下不支持 resolution 参数，已忽略", model)
+                        resolution = ""
 
                 metadata = {"watermark": False}
                 if resolution:
                     metadata["resolution"] = resolution
                 if duration:
                     metadata["duration"] = int(duration)
+                if ratio:
+                    metadata["ratio"] = ratio
+                if generate_audio is not None:
+                    metadata["generate_audio"] = generate_audio
 
-                if images:
+                # 构建 content 数组（包含 prompt text + 媒体引用）
+                if has_media:
                     content = [{"type": "text", "text": prompt}]
                     for img in images:
                         content.append({
@@ -258,48 +370,38 @@ class Handler(BaseHTTPRequestHandler):
                             "image_url": {"url": img},
                             "role": "reference_image",
                         })
+                    content.extend(content_items)
                     metadata["content"] = content
-                    payload["metadata"] = metadata
-                else:
-                    if resolution:
-                        payload["size"] = resolution
-                    if duration:
-                        payload["duration"] = int(duration)
 
-                resp = requests.post(
-                    f"{OPENAI_BASE_URL}/video/generations",
-                    json=payload,
-                    headers=openai_headers(token),
-                )
-                result = resp.json()
-                task_id = result.get("task_id", "")
-                if not task_id:
-                    logger.warning("生成请求失败: %s", result)
-                    self.send_json({"error": result}, 400)
-                    return
+                payload["metadata"] = metadata
 
-                logger.info("任务已提交 task_id=%s prompt=%.80s model=%s quota_before=%s",
-                            task_id, prompt, model,
-                            quota_before.get("quota_balance") if quota_before else "N/A")
-                log_request(task_id, payload, result, quota_before, has_image=bool(images))
-
+                # 立即写入一条 pending 记录，让调用方可以跟踪排队状态
+                pending_id = f"pending-{uuid.uuid4().hex[:12]}"
+                queue_pos = task_queue.qsize() + 1
                 entry = {
-                    "task_id": task_id,
+                    "task_id": pending_id,
+                    "pending_id": pending_id,
                     "prompt": prompt,
                     "model": model,
-                    "status": "queued",
+                    "status": "pending",
                     "progress": "0%",
                     "filename": None,
-                    "has_image": bool(images),
+                    "has_image": has_media,
                     "created_at": int(time.time()),
+                    "queue_position": queue_pos,
                 }
                 with history_lock:
                     history.insert(0, entry)
 
-                t = threading.Thread(target=poll_and_download, args=(task_id, token), daemon=True)
-                t.start()
+                task_meta = {
+                    "has_media": has_media,
+                    "pending_id": pending_id,
+                }
+                task_queue.put((payload, None, task_meta))
+                logger.info("任务入队 pending_id=%s queue_pos=%d has_media=%s prompt=%.80s model=%s",
+                            pending_id, queue_pos, has_media, prompt, model)
 
-                self.send_json({"task_id": task_id})
+                self.send_json({"task_id": pending_id, "queue_position": queue_pos})
             except Exception as e:
                 self.send_json({"error": str(e)}, 500)
         else:
