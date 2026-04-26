@@ -332,7 +332,7 @@ class Handler(BaseHTTPRequestHandler):
             duration = body.get("duration", "")
             images = body.get("images", [])  # list of base64 data URIs
 
-            ratio = body.get("ratio", "")
+            ratio = body.get("ratio", "16:9")
             generate_audio = body.get("generate_audio", None)
             # content items: list of {type, ...url..., role} dicts (image_url/video_url/audio_url)
             content_items = body.get("content", [])
