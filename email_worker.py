@@ -46,8 +46,10 @@ def send_reply(to_addr, subject, body, attachment_path=None):
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
     if attachment_path:
+        ext = os.path.splitext(attachment_path)[1].lower()
+        mime_main, mime_sub = ("image", "png") if ext == ".png" else ("video", "mp4")
         with open(attachment_path, "rb") as f:
-            part = MIMEBase("video", "mp4")
+            part = MIMEBase(mime_main, mime_sub)
             part.set_payload(f.read())
         encoders.encode_base64(part)
         filename = attachment_path.split("\\")[-1].split("/")[-1]
@@ -80,32 +82,61 @@ def read_quota_info(task_id):
         return ""
 
 
-def handle_email(from_addr, subject, params):
+def handle_image_edit(from_addr, subject, params, images):
     prompt = params["prompt"]
-    images = params.pop("images", [])
     logger.info(
-        "收到邮件请求 from=%s subject=%s prompt=%s images=%d model=%s duration=%s resolution=%s",
+        "图片编辑请求 from=%s subject=%s images=%d prompt=%s",
+        from_addr, subject, len(images), prompt,
+    )
+
+    if not images:
+        send_reply(from_addr, subject, "图片编辑需要至少附带 1 张图片，请重新发送邮件并附上图片。")
+        return
+
+    send_reply(from_addr, subject,
+               f"已收到图片编辑请求（{len(images)} 张图片），处理中，完成后会自动发送给您。\n\nPrompt: {prompt}")
+
+    resp = requests.post(f"{API_BASE}/api/edit", json={"prompt": prompt, "images": images})
+    resp_json = resp.json()
+    if resp.status_code != 200 or resp_json.get("error"):
+        logger.error("图片编辑失败: %s", resp.text)
+        send_reply(from_addr, subject, f"图片编辑失败：{resp_json.get('error', resp.text)}")
+        return
+
+    filename = resp_json.get("filename")
+    logger.info("图片编辑完成 filename=%s", filename)
+
+    if filename and os.path.exists(filename):
+        send_reply(from_addr, subject, "您的图片已编辑完成，请查收附件。", attachment_path=filename)
+    else:
+        send_reply(from_addr, subject, "图片编辑完成，但文件暂时无法获取，请稍后重试。")
+
+
+def handle_video(from_addr, subject, params, images):
+    prompt = params["prompt"]
+    logger.info(
+        "视频生成请求 from=%s subject=%s prompt=%s images=%d model=%s duration=%s resolution=%s",
         from_addr, subject, prompt, len(images),
         params.get("model", "-"), params.get("duration", "-"), params.get("resolution", "-"),
     )
 
     img_hint = f"（附带 {len(images)} 张参考图片）" if images else ""
-    send_reply(from_addr, subject, f"已收到您的请求，视频生成中，完成后会自动发送给您。\n\nPrompt: {prompt}{img_hint}")
+    send_reply(from_addr, subject,
+               f"已收到您的请求，视频生成中，完成后会自动发送给您。\n\nPrompt: {prompt}{img_hint}")
 
+    payload = {k: v for k, v in params.items() if k not in ("type",)}
     if images:
-        params["images"] = images
+        payload["images"] = images
 
-    # 提交生成任务
-    resp = requests.post(f"{API_BASE}/api/generate", json=params)
+    resp = requests.post(f"{API_BASE}/api/generate", json=payload)
     resp_json = resp.json()
     if resp.status_code != 200 or resp_json.get("error"):
         send_reply(from_addr, subject, f"视频生成提交失败: {resp.text}")
         return
 
-    task_id = resp_json["task_id"]  # 可能是 pending-xxx，之后会变成真实 task_id
+    task_id = resp_json["task_id"]
     logger.info("任务已入队 task_id=%s from=%s", task_id, from_addr)
 
-    # 轮询等待完成，同时匹配 task_id 或 pending_id（入队阶段 task_id 会变更）
     while True:
         time.sleep(POLL_INTERVAL)
         history = requests.get(f"{API_BASE}/api/history").json()
@@ -115,26 +146,31 @@ def handle_email(from_addr, subject, params):
         )
         if not item:
             continue
-        # 如果真实 task_id 已更新，跟进
         real_task_id = item["task_id"]
         status = item["status"]
         logger.info("轮询 task_id=%s status=%s progress=%s", real_task_id, status, item.get("progress", ""))
-        if status == "SUCCESS":
+        if status == "SUCCESS" and item.get("filename"):
             filename = item.get("filename")
             quota_info = read_quota_info(real_task_id)
-            if filename:
-                send_reply(from_addr, subject, f"您的视频已生成完成，请查收附件。{quota_info}", attachment_path=filename)
-            else:
-                send_reply(from_addr, subject, f"视频生成成功，但文件暂时无法获取，请稍后访问 http://localhost:8765 查看。{quota_info}")
+            send_reply(from_addr, subject, f"您的视频已生成完成，请查收附件。{quota_info}", attachment_path=filename)
             break
         elif status in ("FAILED", "CANCELLED"):
             send_reply(from_addr, subject, f"视频生成失败，请重新发送邮件重试。状态: {status}")
             break
 
 
-VALID_KEYS = {"duration", "resolution", "model"}
+def handle_email(from_addr, subject, params, images):
+    task_type = params.get("type", "").strip().lower()
+    if task_type == "image":
+        handle_image_edit(from_addr, subject, params, images)
+    else:
+        handle_video(from_addr, subject, params, images)
+
+
+VALID_KEYS = {"duration", "resolution", "model", "type"}
 FORMAT_HELP = """邮件正文格式：
 
+【视频生成】
 duration: 时长，秒，如 8（可选）
 resolution: 分辨率，如 1280x720（可选）
 model: 模型名称（可选）
@@ -143,20 +179,17 @@ prompt:
 视频描述内容（必填，支持多行）
 ---
 
-说明：
-- prompt: 单独一行，之后的内容全部作为提示词
-- 用 --- 标记结束，--- 之后的内容（签名、引用等）会被忽略
-- 如果没有 ---，prompt 内容到邮件末尾为止
-
-示例：
-duration: 8
-resolution: 1280x720
+【图片编辑】
+type: image
 
 prompt:
-第一人称视角果茶宣传广告
-镜头从苹果园开始
-慢慢推进到制作过程
----"""
+描述编辑内容，如：把第一张图的人物插入到第二张图场景中（必填）
+---
+
+说明：
+- 图片编辑需要附带 1 张或多张图片附件
+- prompt: 单独一行，之后的内容全部作为提示词
+- 用 --- 标记结束，--- 之后的内容（签名、引用等）会被忽略"""
 
 
 def _clean_body(text):
@@ -328,12 +361,10 @@ def listen():
                         params, error = parse_body(body)
                         if error:
                             logger.warning("格式错误 uid=%s from=%s error=%s", uid, from_addr, error.splitlines()[0])
-                            send_reply(from_addr, subject, f"邮件格式有误，无法生成视频。\n\n{error}")
+                            send_reply(from_addr, subject, f"邮件格式有误，无法处理请求。\n\n{error}")
                             continue
 
-                        if images:
-                            params["images"] = images
-                        t = threading.Thread(target=handle_email, args=(from_addr, subject, params), daemon=True)
+                        t = threading.Thread(target=handle_email, args=(from_addr, subject, params, images), daemon=True)
                         t.start()
 
                     # IDLE 等待新邮件推送，超时后重新 search

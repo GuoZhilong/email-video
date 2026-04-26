@@ -13,8 +13,10 @@ BASE_URL = "https://ai.leihuo.netease.com"
 OPENAI_BASE_URL = "https://ai.leihuo.netease.com/v1"
 COOKIES_FILE = os.path.join(os.path.dirname(__file__), "cookies.txt")
 VIDEOS_DIR = os.path.join(os.path.dirname(__file__), "videos")
+EDITS_DIR = os.path.join(os.path.dirname(__file__), "edits")
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(VIDEOS_DIR, exist_ok=True)
+os.makedirs(EDITS_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
 # 日志配置
@@ -267,6 +269,60 @@ def _submit_and_download(payload, token, task_meta):
         time.sleep(5)
 
 
+def run_image_edit(prompt, images_b64):
+    """调用 /v1/images/edits，同步返回 (filename, error)。"""
+    try:
+        token = get_token()
+    except Exception as e:
+        return None, f"获取 token 失败: {e}"
+
+    # 把 base64 data URI 转回 bytes，multipart 上传
+    files = []
+    for i, uri in enumerate(images_b64):
+        # uri 格式: data:<mime>;base64,<data>
+        try:
+            header, b64data = uri.split(",", 1)
+            mime = header.split(":")[1].split(";")[0]  # e.g. image/jpeg
+            ext = mime.split("/")[1]  # e.g. jpeg
+            data = __import__("base64").b64decode(b64data)
+            files.append(("image", (f"image_{i}.{ext}", data, mime)))
+        except Exception as e:
+            return None, f"图片 {i} 解析失败: {e}"
+
+    data = {
+        "model": "gpt-image-2",
+        "prompt": prompt,
+        "n": "1",
+        "size": "1024x1024",
+    }
+
+    logger.info("图片编辑请求 images=%d prompt=%.80s", len(files), prompt)
+    resp = requests.post(
+        f"{OPENAI_BASE_URL}/images/edits",
+        headers={"Authorization": f"Bearer {token}"},
+        files=files,
+        data=data,
+    )
+    result = resp.json()
+    if "error" in result:
+        logger.warning("图片编辑失败: %s", result["error"])
+        return None, str(result["error"])
+
+    img_list = result.get("data", [])
+    if not img_list or not img_list[0].get("b64_json"):
+        return None, "响应中无图片数据"
+
+    edit_id = uuid.uuid4().hex[:12]
+    filename = os.path.join(EDITS_DIR, f"edit-{edit_id}.png")
+    import base64 as _b64
+    with open(filename, "wb") as f:
+        f.write(_b64.b64decode(img_list[0]["b64_json"]))
+
+    usage = result.get("usage", {})
+    logger.info("图片编辑完成 edit_id=%s tokens=%s file=%s", edit_id, usage.get("total_tokens"), filename)
+    return filename, None
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -316,6 +372,14 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "not found"}, 404)
 
+        elif path.startswith("/api/edit/"):
+            edit_id = path[len("/api/edit/"):]
+            filename = os.path.join(EDITS_DIR, f"edit-{edit_id}.png")
+            if os.path.exists(filename):
+                self.send_file(filename, "image/png")
+            else:
+                self.send_json({"error": "not found"}, 404)
+
         else:
             self.send_json({"error": "not found"}, 404)
 
@@ -323,7 +387,30 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        if path == "/api/generate":
+        if path == "/api/edit":
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            prompt = body.get("prompt", "")
+            images = body.get("images", [])
+
+            if not prompt:
+                self.send_json({"error": "prompt 不能为空"}, 400)
+                return
+            if not images:
+                self.send_json({"error": "至少需要 1 张图片"}, 400)
+                return
+
+            try:
+                filename, error = run_image_edit(prompt, images)
+                if error:
+                    self.send_json({"error": error}, 500)
+                    return
+                edit_id = os.path.basename(filename).replace("edit-", "").replace(".png", "")
+                self.send_json({"edit_id": edit_id, "filename": filename})
+            except Exception as e:
+                self.send_json({"error": str(e)}, 500)
+
+        elif path == "/api/generate":
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             prompt = body.get("prompt", "")
