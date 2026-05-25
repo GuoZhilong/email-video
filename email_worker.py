@@ -97,7 +97,12 @@ def handle_image_edit(from_addr, subject, params, images):
                f"已收到图片编辑请求（{len(images)} 张图片），处理中，完成后会自动发送给您。\n\nPrompt: {prompt}")
 
     resp = requests.post(f"{API_BASE}/api/edit", json={"prompt": prompt, "images": images})
-    resp_json = resp.json()
+    try:
+        resp_json = resp.json()
+    except Exception:
+        logger.error("图片编辑失败（响应非JSON, status=%s）: %s", resp.status_code, resp.text[:500])
+        send_reply(from_addr, subject, f"图片编辑失败（服务器返回异常，状态码 {resp.status_code}）：\n{resp.text[:200]}")
+        return
     if resp.status_code != 200 or resp_json.get("error"):
         logger.error("图片编辑失败: %s", resp.text)
         send_reply(from_addr, subject, f"图片编辑失败：{resp_json.get('error', resp.text)}")
